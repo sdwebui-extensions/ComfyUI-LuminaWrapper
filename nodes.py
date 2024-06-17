@@ -46,12 +46,15 @@ class DownloadAndLoadLuminaModel:
         model_path = os.path.join(folder_paths.models_dir, "lumina", model_name)
         
         if not os.path.exists(model_path):
-            print(f"Downloading Lumina model to: {model_path}")
-            from huggingface_hub import snapshot_download
-            snapshot_download(repo_id=model,
-                            ignore_patterns=['*ema*'],
-                            local_dir=model_path,
-                            local_dir_use_symlinks=False)
+            if os.path.exists(os.path.join("/stable-diffusion-cache/models", "lumina", model_name)):
+                model_path = os.path.join("/stable-diffusion-cache/models", "lumina", model_name)
+            else:
+                print(f"Downloading Lumina model to: {model_path}")
+                from huggingface_hub import snapshot_download
+                snapshot_download(repo_id=model,
+                                ignore_patterns=['*ema*'],
+                                local_dir=model_path,
+                                local_dir_use_symlinks=False)
                   
         train_args = torch.load(os.path.join(model_path, "model_args.pth"))
 
@@ -93,20 +96,23 @@ class DownloadAndLoadGemmaModel:
         gemma_path = os.path.join(folder_paths.models_dir, "LLM", "gemma-2b")
           
         if not os.path.exists(gemma_path):
-            import json
-            token_file_path = os.path.join(script_directory,"hf_token.json")
-            with open(token_file_path, 'r') as file:
-                config = json.load(file)
-            hf_key_from_file = config.get("hf_token")
-            if hf_token == "":
-                hf_token = hf_key_from_file
-            print(f"Downloading Gemma model to: {gemma_path}")
-            from huggingface_hub import snapshot_download
-            snapshot_download(repo_id="google/gemma-2b",
-                            local_dir=gemma_path,
-                            ignore_patterns=['*gguf*'],
-                            token = hf_token,
-                            local_dir_use_symlinks=False)
+            if os.path.exists("/stable-diffusion-cache/models/clip/gemma-2b"):
+                gemma_path = "/stable-diffusion-cache/models/clip/gemma-2b"
+            else:
+                import json
+                token_file_path = os.path.join(script_directory,"hf_token.json")
+                with open(token_file_path, 'r') as file:
+                    config = json.load(file)
+                hf_key_from_file = config.get("hf_token")
+                if hf_token == "":
+                    hf_token = hf_key_from_file
+                print(f"Downloading Gemma model to: {gemma_path}")
+                from huggingface_hub import snapshot_download
+                snapshot_download(repo_id="google/gemma-2b",
+                                local_dir=gemma_path,
+                                ignore_patterns=['*gguf*'],
+                                token = hf_token,
+                                local_dir_use_symlinks=False)
             
         tokenizer = AutoTokenizer.from_pretrained(gemma_path)
         tokenizer.padding_side = "right"

@@ -365,6 +365,14 @@ class Attention(nn.Module):
             # end var_len_flash_attn
 
         else:
+            xk = xk.view(
+                bsz, seqlen, self.n_local_kv_heads, 1, self.head_dim).repeat(
+                    1, 1, 1, self.n_local_heads//self.n_local_kv_heads, 1).view(
+                        bsz, seqlen, self.n_local_heads, self.head_dim)
+            xv = xv.view(
+                bsz, seqlen, self.n_local_kv_heads, 1, self.head_dim).repeat(
+                    1, 1, 1, self.n_local_heads//self.n_local_kv_heads, 1).view(
+                        bsz, seqlen, self.n_local_heads, self.head_dim)
             output = (
                 F.scaled_dot_product_attention(
                     xq.permute(0, 2, 1, 3),
