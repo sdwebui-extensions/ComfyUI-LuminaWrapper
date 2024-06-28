@@ -6,6 +6,7 @@ import gc
 
 import comfy.model_management as mm
 from comfy.utils import ProgressBar, load_torch_file
+
 import folder_paths
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
@@ -14,6 +15,7 @@ sys.path.append(script_directory)
 import lumina_models
 from transport import ODE
 from transformers import AutoModel, AutoTokenizer, GemmaForCausalLM
+from argparse import Namespace
 
 from contextlib import nullcontext
 try:
@@ -67,15 +69,28 @@ class DownloadAndLoadLuminaModel:
         if not os.path.exists(safetensors_path):
             if os.path.exists(os.path.join("/stable-diffusion-cache/models", "lumina", model_name)):
                 model_path = os.path.join("/stable-diffusion-cache/models", "lumina", model_name)
+                safetensors_path = os.path.join(model_path, "consolidated.00-of-01.safetensors")
             else:
                 print(f"Downloading Lumina model to: {model_path}")
                 from huggingface_hub import snapshot_download
                 snapshot_download(repo_id=model,
-                                ignore_patterns=['*ema*'],
+                                ignore_patterns=['*ema*', '*.pth'],
                                 local_dir=model_path,
                                 local_dir_use_symlinks=False)
                   
-        train_args = torch.load(os.path.join(model_path, "model_args.pth"))
+        #train_args = torch.load(os.path.join(model_path, "model_args.pth"))
+
+        train_args = Namespace(
+            model='NextDiT_2B_GQA_patch2',
+            image_size=1024,
+            vae='sdxl',
+            precision='bf16',
+            grad_precision='fp32',
+            grad_clip=2.0,
+            wd=0.0,
+            qk_norm=True,
+            model_parallel_size=1
+        )
 
         with (init_empty_weights() if is_accelerate_available else nullcontext()):
             model = lumina_models.__dict__[train_args.model](qk_norm=train_args.qk_norm, cap_feat_dim=2048)
@@ -409,6 +424,7 @@ class LuminaT2ISampler:
             },
             "optional": {
                 "keep_model_loaded": ("BOOLEAN", {"default": False}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
             }
         }
     
@@ -418,27 +434,33 @@ class LuminaT2ISampler:
     CATEGORY = "LuminaWrapper"
 
     def process(self, lumina_model, lumina_embeds, latent, seed, steps, cfg, proportional_attn, solver, t_shift, 
-                do_extrapolation, scaling_watershed, keep_model_loaded=False):
+                do_extrapolation, scaling_watershed, strength=1.0, keep_model_loaded=False):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
         model = lumina_model['model']
         dtype = lumina_model['dtype']
-        
-        z = latent["samples"].clone()
 
-        B = z.shape[0]
-        W = z.shape[3] * 8
-        H = z.shape[2] * 8
+        vae_scaling_factor = 0.13025 #SDXL scaling factor
+        
+        x1 = latent["samples"].clone() * vae_scaling_factor
+
+        ode = ODE(steps, solver, t_shift, strength)
+
+        B = x1.shape[0]
+        W = x1.shape[3] * 8
+        H = x1.shape[2] * 8
+
+        z = torch.zeros_like(x1)
 
         for i in range(B):
             torch.manual_seed(seed + i)
-            noise = torch.randn_like(z[i])
-            z[i] = z[i] + noise
+            z[i] = torch.randn_like(x1[i])
+            z[i] = z[i] * (1 - ode.t[0]) + x1[i] * ode.t[0]
         
         #torch.random.manual_seed(int(seed))
         #z = torch.randn([1, 4, z.shape[2], z.shape[3]], device=device)
-
+       
         z = z.repeat(2, 1, 1, 1)
         z = z.to(dtype).to(device)
 
@@ -484,20 +506,25 @@ class LuminaT2ISampler:
             model_kwargs["scale_factor"] = 1.0
             model_kwargs["scale_watershed"] = 1.0
 
-        #inference
-        model.to(device)
-
-        samples = ODE(steps, solver, t_shift).sample(z, model.forward_with_cfg, **model_kwargs)[-1]
-
-        if not keep_model_loaded:
+        def offload_model():
             print("Offloading Lumina model...")
             model.to(offload_device)
             mm.soft_empty_cache()
             gc.collect()
+
+        #inference
+        model.to(device)
+        try:
+            samples = ode.sample(z, model.forward_with_cfg, **model_kwargs)[-1]
+        except:
+            if not keep_model_loaded:
+                offload_model()
+            raise mm.InterruptProcessingException()
+
+        if not keep_model_loaded:
+            offload_model()           
             
         samples = samples[:len(samples) // 2]
-
-        vae_scaling_factor = 0.13025 #SDXL scaling factor
         samples = samples / vae_scaling_factor
 
         return ({'samples': samples},)   
